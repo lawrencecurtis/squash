@@ -56,6 +56,7 @@ fi
 # ==============================================================================
 SCRIPT_PATH=$(realpath "$0")
 BASE_COMMIT=""
+LOG_RANGE=""
 
 # 1. Determine Base Commit based on arguments or TUI
 if [ "$1" = "--wip" ] || [ "$1" = "auto" ]; then
@@ -63,8 +64,15 @@ if [ "$1" = "--wip" ] || [ "$1" = "auto" ]; then
     OLDEST_WIP=$(git log -i --grep="^wip" --format="%H" | tail -n 1)
 
     if [ -n "$OLDEST_WIP" ]; then
-        BASE_COMMIT="${OLDEST_WIP}~1"
-        echo "Auto-detected earliest WIP commit. Using parent $BASE_COMMIT as base."
+        if git rev-parse --verify "${OLDEST_WIP}~1" >/dev/null 2>&1; then
+            BASE_COMMIT="${OLDEST_WIP}~1"
+            LOG_RANGE="${BASE_COMMIT}..HEAD"
+            echo "Auto-detected earliest WIP commit. Using parent $BASE_COMMIT as base."
+        else
+            BASE_COMMIT="--root"
+            LOG_RANGE="HEAD"
+            echo "Auto-detected earliest WIP commit as the repository root. Using --root."
+        fi
     else
         echo "No 'WIP' commits found in history."
         exit 1
@@ -72,6 +80,7 @@ if [ "$1" = "--wip" ] || [ "$1" = "auto" ]; then
 elif [ -n "$1" ]; then
     # User passed a specific commit hash (e.g., HEAD~5)
     BASE_COMMIT=$1
+    LOG_RANGE="${BASE_COMMIT}..HEAD"
 else
     # TUI Selection via fzf
     if ! command -v fzf &>/dev/null; then
@@ -87,11 +96,12 @@ else
         echo "Aborted."
         exit 0
     fi
+    LOG_RANGE="${BASE_COMMIT}..HEAD"
 fi
 
 # 2. Gather History and Generate Rebase Plan
-echo "Gathering commit history from $BASE_COMMIT..."
-HISTORY=$(git log --reverse --format="Commit: \%h\%nMessage: \%s" --name-status ${BASE_COMMIT}..HEAD)
+echo "Gathering commit history..."
+HISTORY=$(git log --reverse --format="Commit: \%h\%nMessage: \%s" --name-status $LOG_RANGE)
 
 SYSTEM_PROMPT="You are a git rebase automation tool. Your job is to group related commits together based on the files they modify or their features.
 I will provide a chronological list of commits and the files they touch.
@@ -103,7 +113,8 @@ Rules:
 3. Order the groups logically.
 4. Immediately after the last 'squash' (or 'pick' if it's a standalone commit) of EACH group, add this exact line:
    exec $SCRIPT_PATH --rewrite
-5. Output ONLY the rebase commands. No explanations, no markdown blocks, no backticks."
+5. Output ONLY the rebase commands. No explanations, no markdown blocks, no backticks.
+6. CRITICAL: You must use the EXACT commit hashes provided in the input. Do not alter, misspell, or truncate the hashes."
 
 PAYLOAD=$(jq -n \
     --arg history "$HISTORY" \
