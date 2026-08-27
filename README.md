@@ -29,7 +29,7 @@ To use `squash`, you need the following CLI tools installed:
 1. Download the script:
 
 ```bash
-curl -O squash [https://raw.githubusercontent.com/lawrencecurtis/squash/main/squash.sh](https://raw.githubusercontent.com/lawrencecurtis/squash/main/squash.sh)
+wget -O squash https://raw.githubusercontent.com/lawrencecurtis/squash/refs/heads/main/squash.sh
 ```
 
 2. Make it executable:
