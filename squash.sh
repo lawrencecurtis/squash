@@ -101,7 +101,7 @@ fi
 
 # 2. Gather History and Generate Rebase Plan
 echo "Gathering commit history..."
-HISTORY=$(git log --reverse --format="Commit: \%h\%nMessage: \%s" --name-status $LOG_RANGE)
+HISTORY=$(git log --reverse --format="Commit: %h%nMessage: %s" --name-status $LOG_RANGE)
 
 SYSTEM_PROMPT="You are a git rebase automation tool. Your job is to group related commits together based on the files they modify or their features.
 I will provide a chronological list of commits and the files they touch.
