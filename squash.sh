@@ -113,8 +113,15 @@ Rules:
 3. Order the groups logically.
 4. Immediately after the last 'squash' (or 'pick' if it's a standalone commit) of EACH group, add this exact line:
    exec $SCRIPT_PATH --rewrite
-5. Output ONLY the rebase commands. No explanations, no markdown blocks, no backticks.
-6. CRITICAL: You must use the EXACT commit hashes provided in the input. Do not alter, misspell, or truncate the hashes."
+5. Output ONLY the valid git rebase commands. No explanations, no markdown blocks.
+6. CRITICAL: You must use the EXACT commit hashes provided in the input. Do not alter, misspell, or truncate the hashes.
+
+EXAMPLE OUTPUT FORMAT:
+pick 1a2b3c4
+squash 5d6e7f8
+exec $SCRIPT_PATH --rewrite
+pick 9a0b1c2
+exec $SCRIPT_PATH --rewrite"
 
 PAYLOAD=$(jq -n \
     --arg history "$HISTORY" \
