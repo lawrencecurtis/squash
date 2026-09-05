@@ -32,13 +32,28 @@ Follow good Git style:
 - Include a markdown dashed list overview of the changes at the top of the body
 - Do not repeat things from the markdown list in the body"
 
+    # Optimization: 'think: false', capped output tokens, right-sized context window
     PAYLOAD=$(jq -n \
-        --arg diff "$DIFF" \
+        --arg diff "/no_think $DIFF" \
         --arg system "$SYSTEM_PROMPT" \
         --arg model "$MODEL" \
-        '{ model: $model, system: $system, prompt:$diff, stream: false }')
+        '{
+            model: $model,
+            system: $system,
+            prompt: $diff,
+            stream: false,
+            think: false,
+            options: {
+                num_predict: 512,
+                num_ctx: 16384,
+                temperature: 0.2
+            }
+        }')
 
-    NEW_MSG=$(curl -s $OLLAMA_URL -d "$PAYLOAD" | jq -r '.response')
+    RAW_RESPONSE=$(curl -s $OLLAMA_URL -d "$PAYLOAD" | jq -r '.response')
+
+    # Cleaning: Remove potential <think> tags or markdown backticks
+    NEW_MSG=$(echo "$RAW_RESPONSE" | sed -E 's/<think>.*<\/think>//g' | sed 's/^```.*//g' | sed 's/```$//g')
 
     if [ -n "$NEW_MSG" ]; then
         echo -e "\n=== 🤖 New Commit Generated ==="
@@ -101,7 +116,7 @@ fi
 
 # 2. Gather History and Generate Rebase Plan
 echo "Gathering commit history..."
-HISTORY=$(git log --reverse --format="Commit: %h%nMessage: %s" --name-status $LOG_RANGE)
+HISTORY=$(git log --reverse --format="Commit: \%h\%nMessage: \%s" --name-status $LOG_RANGE)
 
 SYSTEM_PROMPT="You are a git rebase automation tool. Your job is to group related commits together based on the files they modify or their features.
 I will provide a chronological list of commits and the files they touch.
@@ -123,17 +138,29 @@ exec $SCRIPT_PATH --rewrite
 pick 9a0b1c2
 exec $SCRIPT_PATH --rewrite"
 
+# Optimization: 'think: false', fast deterministic sampling
 PAYLOAD=$(jq -n \
-    --arg history "$HISTORY" \
+    --arg history "/no_think $HISTORY" \
     --arg system "$SYSTEM_PROMPT" \
     --arg model "$MODEL" \
-    '{ model: $model, system: $system, prompt:$history, stream: false }')
+    '{
+        model: $model,
+        system: $system,
+        prompt: $history,
+        stream: false,
+        think: false,
+        options: {
+            num_predict: 1024,
+            num_ctx: 32768,
+            temperature: 0.1
+        }
+    }')
 
 echo "Asking Ollama to cluster your commits..."
 RESPONSE=$(curl -s $OLLAMA_URL -d "$PAYLOAD" | jq -r '.response')
 
-# Guardrail: Strip accidental markdown and validate
-CLEAN_TODO=$(echo "$RESPONSE" | sed 's/```.*//g' | grep -E '^(pick|squash|exec|p|s) ')
+# Guardrail: Strip accidental reasoning blocks, markdown fences, and keep only rebase commands
+CLEAN_TODO=$(echo "$RESPONSE" | sed -E 's/<think>.*<\/think>//g' | sed 's/```.*//g' | grep -E '^(pick|squash|exec|p|s) ')
 
 if [ -z "$CLEAN_TODO" ]; then
     echo "Error: Ollama didn't return a valid rebase plan. Raw output:"
