@@ -10,7 +10,20 @@ OLLAMA_URL="http://localhost:11434/api/generate"
 # ==============================================================================
 if [ "$1" = "--rewrite" ]; then
     echo "Drafting new commit message..."
-    DIFF=$(git show HEAD --stat -p)
+
+    # 1. Always get the full file summary (including deleted files and binaries)
+    STAT=$(git show HEAD --stat --format="Original Subject: %s%n")
+
+    # 2. Get patch ONLY for added/modified files (skipping deleted files),
+    #    excluding noisy lockfiles/minified assets, capped at 12,000 chars.
+    #    (Git automatically omits binary data unless --binary is passed)
+    PATCH=$(git show HEAD -p --diff-filter=ACMR --unified=1 \
+        -- . \
+        ':!package-lock.json' ':!yarn.lock' ':!pnpm-lock.yaml' \
+        ':!go.sum' ':!Cargo.lock' ':!*.min.js' ':!*.min.css' ':!*.svg' |
+        head -c 12000)
+
+    DIFF="${STAT}"$'\n\n'"--- Diff Patch (Truncated if large) ---"$'\n'"${PATCH}"
 
     SYSTEM_PROMPT="You are an expert at writing Git commits.
 Your job is to write a short clear commit message that summarizes the changes.
@@ -32,33 +45,32 @@ Follow good Git style:
 - Include a markdown dashed list overview of the changes at the top of the body
 - Do not repeat things from the markdown list in the body"
 
-    # Optimization: 'think: false', capped output tokens, right-sized context window
-    PAYLOAD=$(jq -n \
-        --arg diff "/no_think $DIFF" \
+    # Pipe DIFF via stdin to avoid ARG_MAX limits, right-sized context window
+    RAW_RESPONSE=$(printf "/no_think \%s" "$DIFF" | jq -R -s \
         --arg system "$SYSTEM_PROMPT" \
         --arg model "$MODEL" \
         '{
             model: $model,
             system: $system,
-            prompt: $diff,
+            prompt: .,
             stream: false,
             think: false,
+            keep_alive: "10m",
             options: {
-                num_predict: 512,
-                num_ctx: 16384,
+                num_predict: 350,
+                num_ctx: 8192,
                 temperature: 0.2
             }
-        }')
-
-    RAW_RESPONSE=$(curl -s $OLLAMA_URL -d "$PAYLOAD" | jq -r '.response')
+        }' | curl -s "$OLLAMA_URL" -d @- | jq -r '.response')
 
     # Cleaning: Remove potential <think> tags or markdown backticks
     NEW_MSG=$(echo "$RAW_RESPONSE" | sed -E 's/<think>.*<\/think>//g' | sed 's/^```.*//g' | sed 's/```$//g')
 
-    if [ -n "$NEW_MSG" ]; then
+    if [ -n "$NEW_MSG" ] && [ "$NEW_MSG" != "null" ]; then
         echo -e "\n=== 🤖 New Commit Generated ==="
         echo "$NEW_MSG"
         echo "==============================="
+        for _ in {1..10}; do [ ! -f .git/index.lock ] && break; sleep 0.1; done
         git commit --amend -m "$NEW_MSG"
     else
         echo "Failed to generate commit message."
@@ -76,7 +88,8 @@ LOG_RANGE=""
 # 1. Determine Base Commit based on arguments or TUI
 if [ "$1" = "--wip" ] || [ "$1" = "auto" ]; then
     # Find the OLDEST commit starting with "wip" or "WIP"
-    OLDEST_WIP=$(git log -i --grep="^wip" --format="%H" | tail -n 1)
+    UPSTREAM_RANGE=$(git rev-parse --abbrev-ref --symbolic-full-name @{u} >/dev/null 2>&1 && echo "@{u}..HEAD" || echo "HEAD")
+    OLDEST_WIP=$(git log $UPSTREAM_RANGE -i --grep="^wip" --format="%H" | tail -n 1)
 
     if [ -n "$OLDEST_WIP" ]; then
         if git rev-parse --verify "${OLDEST_WIP}~1" >/dev/null 2>&1; then
@@ -116,20 +129,22 @@ fi
 
 # 2. Gather History and Generate Rebase Plan
 echo "Gathering commit history..."
-HISTORY=$(git log --reverse --format="Commit: \%h\%nMessage: \%s" --name-status $LOG_RANGE)
+HISTORY=$(git log --reverse --format="Commit: %h%nMessage: %s" --name-status $LOG_RANGE)
 
-SYSTEM_PROMPT="You are a git rebase automation tool. Your job is to group related commits together based on the files they modify or their features.
+SYSTEM_PROMPT="You are a git rebase automation tool. Your job is to group adjacent related commits together based on the files they modify or their features.
 I will provide a chronological list of commits and the files they touch.
 You must output a git interactive rebase todo list.
 
 Rules:
-1. Group related commits together (e.g., commits touching the same files or features).
+1. Group adjacent related commits together (e.g., consecutive commits touching the same files or features).
 2. For each group, 'pick' the first commit, and 'squash' the rest in that group.
-3. Order the groups logically.
+3. Preserve the exact chronological order of commits. Reordering commits is strictly forbidden.
 4. Immediately after the last 'squash' (or 'pick' if it's a standalone commit) of EACH group, add this exact line:
    exec $SCRIPT_PATH --rewrite
 5. Output ONLY the valid git rebase commands. No explanations, no markdown blocks.
 6. CRITICAL: You must use the EXACT commit hashes provided in the input. Do not alter, misspell, or truncate the hashes.
+7. Never drop a commit.
+8. Only squash commits that are small or clearly part of the same work-in-progress.
 
 EXAMPLE OUTPUT FORMAT:
 pick 1a2b3c4
@@ -138,29 +153,30 @@ exec $SCRIPT_PATH --rewrite
 pick 9a0b1c2
 exec $SCRIPT_PATH --rewrite"
 
-# Optimization: 'think: false', fast deterministic sampling
-PAYLOAD=$(jq -n \
-    --arg history "/no_think $HISTORY" \
+echo "Asking Ollama to cluster your commits..."
+RESPONSE=$(printf "/no_think \%s" "$HISTORY" | jq -R -s \
     --arg system "$SYSTEM_PROMPT" \
     --arg model "$MODEL" \
     '{
         model: $model,
         system: $system,
-        prompt: $history,
+        prompt: .,
         stream: false,
         think: false,
+        keep_alive: "10m",
         options: {
             num_predict: 1024,
-            num_ctx: 32768,
+            num_ctx: 16384,
             temperature: 0.1
         }
-    }')
-
-echo "Asking Ollama to cluster your commits..."
-RESPONSE=$(curl -s $OLLAMA_URL -d "$PAYLOAD" | jq -r '.response')
+    }' | curl -s "$OLLAMA_URL" -d @- | jq -r '.response')
 
 # Guardrail: Strip accidental reasoning blocks, markdown fences, and keep only rebase commands
-CLEAN_TODO=$(echo "$RESPONSE" | sed -E 's/<think>.*<\/think>//g' | sed 's/```.*//g' | grep -E '^(pick|squash|exec|p|s) ')
+CLEAN_TODO=$(echo "$RESPONSE" | sed -E 's/<think>.*<\/think>//g' | sed 's/```.*//g' | grep -E '^(pick|squash|exec|p|s) ' | while read -r cmd arg rest; do
+    if [ "$cmd" = "exec" ] || git rev-parse --verify -q "${arg}^{commit}" >/dev/null 2>&1; then
+        echo "$cmd $arg${rest:+ $rest}"
+    fi
+done)
 
 if [ -z "$CLEAN_TODO" ]; then
     echo "Error: Ollama didn't return a valid rebase plan. Raw output:"
